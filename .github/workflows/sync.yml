@@ -10,8 +10,35 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: SeerAPI/seer-unity-assets
+      UPSTREAM_BRANCH: main
+      GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
     steps:
-      - name: Sync upstream
-        run: gh repo sync ${{ github.repository }} --force
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sync upstream while preserving workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          cd "$workdir"
+          git init -q
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --depth=1 --filter=blob:none origin "${UPSTREAM_BRANCH}"
+          git fetch --depth=1 --filter=blob:none upstream "${UPSTREAM_BRANCH}"
+          current_commit="$(git rev-parse FETCH_HEAD^0)"
+          upstream_commit="$(git rev-parse upstream/${UPSTREAM_BRANCH})"
+          git show "${current_commit}:.github/workflows/sync.yml" > sync.yml
+          sync_blob="$(git hash-object -w sync.yml)"
+          git read-tree "${upstream_commit}^{tree}"
+          git update-index --add --cacheinfo 100644 "${sync_blob}" .github/workflows/sync.yml
+          new_tree="$(git write-tree)"
+          current_tree="$(git show -s --format=%T "${current_commit}")"
+          if [ "${new_tree}" = "${current_tree}" ]; then
+            echo "Already up to date."
+            exit 0
+          fi
+          new_commit="$(printf 'chore: sync upstream\n' | git commit-tree "${new_tree}" -p "${upstream_commit}")"
+          git push --force origin "${new_commit}:refs/heads/${UPSTREAM_BRANCH}"
