@@ -1,21 +1,27 @@
 name: Sync Fork
+
 on:
-  schedule:
-    - cron: '*/30 * * * *'
   workflow_dispatch:
+  schedule:
+    - cron: '0 * * * *'
 
 permissions:
   contents: write
 
+concurrency:
+  group: sync-fork-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: SeerAPI/seer-unity-assets
+  UPSTREAM_BRANCH: main
+  GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+
 jobs:
   sync:
     runs-on: ubuntu-latest
-    env:
-      UPSTREAM_REPO: SeerAPI/seer-unity-assets
-      UPSTREAM_BRANCH: main
-      GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
     steps:
-      - name: Sync upstream while preserving workflow
+      - name: Sync upstream while preserving fork workflows
         shell: bash
         run: |
           set -euo pipefail
@@ -30,15 +36,23 @@ jobs:
           git fetch --depth=1 --filter=blob:none upstream "${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
           current_commit="$(git rev-parse "refs/remotes/origin/${UPSTREAM_BRANCH}")"
           upstream_commit="$(git rev-parse "refs/remotes/upstream/${UPSTREAM_BRANCH}")"
-          git show "${current_commit}:.github/workflows/sync.yml" > sync.yml
-          sync_blob="$(git hash-object -w sync.yml)"
+
           git read-tree "${upstream_commit}^{tree}"
-          git update-index --add --cacheinfo 100644 "${sync_blob}" .github/workflows/sync.yml
+          if git ls-files '.github/workflows/*' --error-unmatch >/dev/null 2>&1; then
+            git ls-files -z '.github/workflows/*' | xargs -0 -r git update-index --force-remove --
+          fi
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            mode="$(git ls-tree "${current_commit}" "$path" | awk '{print $1}')"
+            blob="$(git rev-parse "${current_commit}:${path}")"
+            git update-index --add --cacheinfo "${mode}" "${blob}" "$path"
+          done < <(git ls-tree -r --name-only "${current_commit}" .github/workflows || true)
+
           new_tree="$(git write-tree)"
           current_tree="$(git show -s --format=%T "${current_commit}")"
           if [ "${new_tree}" = "${current_tree}" ]; then
             echo "Already up to date."
             exit 0
           fi
-          new_commit="$(printf 'chore: sync upstream\n' | git commit-tree "${new_tree}" -p "${upstream_commit}")"
-          git push --force origin "${new_commit}:refs/heads/${UPSTREAM_BRANCH}"
+          new_commit="$(printf 'chore: sync upstream\n' | git commit-tree "${new_tree}" -p "${current_commit}")"
+          git push origin "${new_commit}:refs/heads/${UPSTREAM_BRANCH}"
